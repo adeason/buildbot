@@ -79,6 +79,8 @@ Features
 
 * The pubDate in RSS feeds is now rendered correctly (:bb:bug:`2530`)
 
+* Git source checkout step now supports reference repositories.
+
 Deprecations, Removals, and Non-Compatible Changes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
