@@ -81,6 +81,8 @@ Features
 
 * Git source checkout step now supports reference repositories.
 
+* Master side source checkout steps now support patches
+
 Deprecations, Removals, and Non-Compatible Changes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
