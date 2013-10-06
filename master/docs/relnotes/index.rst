@@ -87,6 +87,8 @@ Features
 
 * Gerrit integration with Git Source step on master side.
 
+* ``GerritStatusPush`` now supports setting scores with Gerrit 2.6 and newer
+
 Deprecations, Removals, and Non-Compatible Changes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -22,6 +22,7 @@ from buildbot.status.base import StatusReceiverMultiService
 from buildbot.status.builder import Results, SUCCESS, RETRY
 from twisted.internet import reactor
 from twisted.internet.protocol import ProcessProtocol
+from distutils.version import LooseVersion
 
 def defaultReviewCB(builderName, build, result, status, arg):
     if result == RETRY:
@@ -60,6 +61,37 @@ class GerritStatusPush(StatusReceiverMultiService):
         self.reviewArg = reviewArg
         self.startCB = startCB
         self.startArg = startArg
+
+    def _gerritCmd(self, *args):
+        return ["ssh", self.gerrit_username + "@" + self.gerrit_server, "-p %d" % self.gerrit_port, "gerrit"] + list(args)
+
+    class VersionPP(ProcessProtocol):
+        def __init__(self, func):
+            self.func = func
+            self.gerrit_version = None
+
+        def outReceived(self, data):
+            vstr = "gerrit version "
+            if not data.startswith(vstr):
+                print "Error: Cannot interpret gerrit version info:", data
+                return
+            vers = data[len(vstr):]
+            print "gerrit version:", vers
+            self.gerrit_version = LooseVersion(vers)
+
+        def errReceived(self, data):
+            print "gerriterr:", data
+
+        def processEnded(self, status_object):
+            if status_object.value.exitCode:
+                print "gerrit version status: ERROR:", status_object
+                return
+            if self.gerrit_version:
+                self.func(self.gerrit_version)
+
+    def callWithVersion(self, func):
+        command = self._gerritCmd("version")
+        reactor.spawnProcess(self.VersionPP(func), command[0], command)
 
     class LocalPP(ProcessProtocol):
         def __init__(self, status):
@@ -133,17 +165,31 @@ class GerritStatusPush(StatusReceiverMultiService):
                 self.sendCodeReview(project, revision, message, verified, reviewed)
                 return
 
-    def sendCodeReview(self, project, revision, message=None, verified=0, reviewed=0):
-        command = ["ssh", self.gerrit_username + "@" + self.gerrit_server, "-p %d" % self.gerrit_port,
-                   "gerrit", "review", "--project %s" % str(project)]
+    def sendCodeReview(self, project, revision, message=None, verified=0, reviewed=0, gerrit_version=None):
+        if (verified or reviewed) and gerrit_version is None:
+            self.callWithVersion(lambda gerrit_version: self.sendCodeReview(project, revision, message, verified, reviewed, gerrit_version))
+            return
+
+        command = self._gerritCmd("review", "--project %s" % str(project))
         if message:
             command.append("--message '%s'" % message.replace("'","\""))
+
         if verified:
-            command.extend(["--verified %d" % int(verified)])
+            assert(gerrit_version)
+            if gerrit_version < LooseVersion("2.6"):
+                command.extend(["--verified %d" % int(verified)])
+            else:
+                command.extend(["--label Verified=%d" % int(verified)])
+
         if reviewed:
-            command.extend(["--code-review %d" % int(reviewed)])
+            assert(gerrit_version)
+            if gerrit_version < LooseVersion("2.6"):
+                command.extend(["--code-review %d" % int(reviewed)])
+            else:
+                command.extend(["--label Code-Review=%d" % int(reviewed)])
+
         command.append(str(revision))
         print command
-        reactor.spawnProcess(self.LocalPP(self), "ssh", command)
+        reactor.spawnProcess(self.LocalPP(self), command[0], command)
 
 # vim: set ts=4 sts=4 sw=4 et:
