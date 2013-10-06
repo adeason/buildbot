@@ -48,7 +48,7 @@ Charset.add_charset('utf-8', Charset.SHORTEST, None, 'utf-8')
 
 from buildbot import interfaces, util, config
 from buildbot.process.users import users
-from buildbot.status import base
+from buildbot.status import base, buildset
 from buildbot.status.results import FAILURE, SUCCESS, WARNINGS, EXCEPTION, Results
 
 VALID_EMAIL = re.compile("[a-zA-Z0-9\.\_\%\-\+]+@[a-zA-Z0-9\.\_\%\-]+.[a-zA-Z]{2,6}")
@@ -156,7 +156,7 @@ def defaultMessage(mode, name, build, results, master_status):
 def defaultGetPreviousBuild(current_build):
         return current_build.getPreviousBuild()
 
-class MailNotifier(base.StatusReceiverMultiService):
+class MailNotifier(base.StatusReceiverMultiService, buildset.BuildSetSummaryNotifierMixin):
     """This is a status notifier which sends email to a list of recipients
     upon the completion of each build. It can be configured to only send out
     mail for certain builds, and only send messages when the build fails, or
@@ -393,15 +393,12 @@ class MailNotifier(base.StatusReceiverMultiService):
 
     def startService(self):
         if self.buildSetSummary:
-            self.buildSetSubscription = \
-            self.master.subscribeToBuildsetCompletions(self.buildsetFinished)
+            self.summarySubscribe()
  
         base.StatusReceiverMultiService.startService(self)
 
     def stopService(self):
-        if self.buildSetSubscription is not None:
-            self.buildSetSubscription.unsubscribe()
-            self.buildSetSubscription = None
+        self.summaryUnsubscribe()
             
         return base.StatusReceiverMultiService.stopService(self)
 
@@ -428,6 +425,9 @@ class MailNotifier(base.StatusReceiverMultiService):
 
     def buildStarted(self, name, build):
         pass
+
+    def includeInSummary(self, build, results):
+        return self.isMailNeeded(build, results)
 
     def isMailNeeded(self, build, results):
         # here is where we actually do something.
@@ -456,6 +456,9 @@ class MailNotifier(base.StatusReceiverMultiService):
 
         return False
 
+    def sendBuildSetSummary(self, buildset, builds):
+        self.buildMessage("(whole buildset)", builds, buildset['results'])
+
     def buildFinished(self, name, build, results):
         if ( not self.buildSetSummary and
              self.isMailNeeded(build, results) ):
@@ -468,39 +471,6 @@ class MailNotifier(base.StatusReceiverMultiService):
             return self.buildMessage(name, [build], results)
         return None
     
-    def _gotBuilds(self, res, buildset):
-        builds = []
-        for (builddictlist, builder) in res:
-            for builddict in builddictlist:
-                build = builder.getBuild(builddict['number'])
-                if build is not None and self.isMailNeeded(build, build.results):
-                    builds.append(build)
-
-        if builds:
-            self.buildMessage("(whole buildset)", builds, buildset['results'])
-        
-    def _gotBuildRequests(self, breqs, buildset):
-        dl = []
-        for breq in breqs:
-            buildername = breq['buildername']
-            builder = self.master_status.getBuilder(buildername)
-            d = self.master.db.builds.getBuildsForRequest(breq['brid'])
-            d.addCallback(lambda builddictlist, builder=builder:
-                          (builddictlist, builder))
-            dl.append(d)
-        d = defer.gatherResults(dl)
-        d.addCallback(self._gotBuilds, buildset)
-
-    def _gotBuildSet(self, buildset, bsid):
-        d = self.master.db.buildrequests.getBuildRequests(bsid=bsid)
-        d.addCallback(self._gotBuildRequests, buildset)
-        
-    def buildsetFinished(self, bsid, result):
-        d = self.master.db.buildsets.getBuildset(bsid=bsid)
-        d.addCallback(self._gotBuildSet, bsid)
-            
-        return d
-
     def getCustomMesgData(self, mode, name, build, results, master_status):
         #
         # logs is a list of tuples that contain the log

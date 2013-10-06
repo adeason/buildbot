@@ -14,6 +14,7 @@
 # Copyright Buildbot Team Members
 
 from zope.interface import implements
+from twisted.internet import defer
 from buildbot import interfaces
 from buildbot.status.buildrequest import BuildRequestStatus
 
@@ -66,3 +67,48 @@ class BuildSetStatus:
         d = dict(self.bsdict)
         d["submitted_at"] = str(self.bsdict["submitted_at"])
         return d
+
+class BuildSetSummaryNotifierMixin:
+    def summarySubscribe(self):
+        self.buildSetSubscription = self.master.subscribeToBuildsetCompletions(self.buildsetFinished)
+
+    def summaryUnsubscribe(self):
+        if self.buildSetSubscription is not None:
+            self.buildSetSubscription.unsubscribe()
+            self.buildSetSubscription = None
+
+    def buildsetFinished(self, bsid, result):
+        d = self.master.db.buildsets.getBuildset(bsid=bsid)
+        d.addCallback(self._gotBuildSet, bsid)
+        return d
+
+    def _gotBuildSet(self, buildset, bsid):
+        d = self.master.db.buildrequests.getBuildRequests(bsid=bsid)
+        d.addCallback(self._gotBuildRequests, buildset)
+
+    def _gotBuildRequests(self, breqs, buildset):
+        dl = []
+        for breq in breqs:
+            buildername = breq['buildername']
+            builder = self.master_status.getBuilder(buildername)
+            d = self.master.db.builds.getBuildsForRequest(breq['brid'])
+            d.addCallback(lambda builddictlist, builder=builder:
+                          (builddictlist, builder))
+            dl.append(d)
+        d = defer.gatherResults(dl)
+        d.addCallback(self._gotBuilds, buildset)
+
+    def includeInSummary(self, build, results):
+        return True
+    def _gotBuilds(self, res, buildset):
+        builds = []
+        for (builddictlist, builder) in res:
+            for builddict in builddictlist:
+                build = builder.getBuild(builddict['number'])
+                if build is not None and self.includeInSummary(build, build.results):
+                    builds.append(build)
+
+        if builds:
+            # We've received all of the information about the builds in this
+            # buildset; now send out the summary
+            self.sendBuildSetSummary(buildset, builds)

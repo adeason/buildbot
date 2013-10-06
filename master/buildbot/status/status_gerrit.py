@@ -18,8 +18,9 @@
 
 ."""
 
+from buildbot.status import buildset
 from buildbot.status.base import StatusReceiverMultiService
-from buildbot.status.builder import Results, SUCCESS, RETRY
+from buildbot.status.builder import Results, SUCCESS, RETRY, FAILURE, WARNINGS, EXCEPTION
 from twisted.internet import reactor
 from twisted.internet.protocol import ProcessProtocol
 from distutils.version import LooseVersion
@@ -35,12 +36,41 @@ def defaultReviewCB(builderName, build, result, status, arg):
     # message, verified, reviewed
     return message, (result == SUCCESS or -1), 0
 
-class GerritStatusPush(StatusReceiverMultiService):
+def simpleSummaryCB(buildInfoList, results, status, arg):
+    success = False
+    failure = False
+
+    msgs = []
+
+    for buildInfo in buildInfoList:
+        msg = "Builder %(name)s %(resultText)s (%(text)s)" % buildInfo
+        link = buildInfo.get('url', None)
+        if link:
+            msg += " - " + link
+        else:
+            msg += "."
+        msgs.append(msg)
+
+        if buildInfo['result'] == SUCCESS:
+            success = True
+        else:
+            failure = True
+
+    msg = '\n\n'.join(msgs)
+
+    verified = 0
+    if success and not failure:
+        verified = 1
+
+    reviewed = 0
+    return (msg, verified, reviewed)
+
+class GerritStatusPush(StatusReceiverMultiService, buildset.BuildSetSummaryNotifierMixin):
     """Event streamer to a gerrit ssh server."""
 
     def __init__(self, server, username, reviewCB=defaultReviewCB,
                 startCB=None, port=29418, reviewArg=None,
-                startArg=None, **kwargs):
+                startArg=None, summaryCB=None, summaryArg=None, **kwargs):
         """
         @param server:    Gerrit SSH server's address to use for push event notifications.
         @param username:  Gerrit SSH server's username.
@@ -61,6 +91,8 @@ class GerritStatusPush(StatusReceiverMultiService):
         self.reviewArg = reviewArg
         self.startCB = startCB
         self.startArg = startArg
+        self.summaryCB = summaryCB
+        self.summaryArg = summaryArg
 
     def _gerritCmd(self, *args):
         return ["ssh", self.gerrit_username + "@" + self.gerrit_server, "-p %d" % self.gerrit_port, "gerrit"] + list(args)
@@ -109,11 +141,24 @@ class GerritStatusPush(StatusReceiverMultiService):
             else:
                 print "gerrit status: OK"
 
+    def setServiceParent(self, parent):
+        """
+        @type  parent: L{buildbot.master.BuildMaster}
+        """
+        StatusReceiverMultiService.setServiceParent(self, parent)
+        self.master_status = self.parent
+        self.master_status.subscribe(self)
+        self.master = self.master_status.master
+
     def startService(self):
         print """Starting up."""
+        if self.summaryCB:
+            self.summarySubscribe()
+
         StatusReceiverMultiService.startService(self)
-        self.status = self.parent.getStatus()
-        self.status.subscribe(self)
+
+    def stopService(self):
+        self.summaryUnsubscribe()
 
     def builderAdded(self, name, builder):
         return self # subscribe to this builder
@@ -125,8 +170,31 @@ class GerritStatusPush(StatusReceiverMultiService):
 
     def buildFinished(self, builderName, build, result):
         """Do the SSH gerrit verify command to the server."""
-        message, verified, reviewed = self.reviewCB(builderName, build, result, self.status, self.reviewArg)
-        self.sendCodeReviews(build, message, verified, reviewed)
+        if self.reviewCB:
+            message, verified, reviewed = self.reviewCB(builderName, build, result, self.master_status, self.reviewArg)
+            self.sendCodeReviews(build, message, verified, reviewed)
+
+    def sendBuildSetSummary(self, buildset, builds):
+        if self.summaryCB:
+            def getBuildInfo(build):
+                result = build.getResults()
+                resultText = {
+                    SUCCESS:   "succeeded",
+                    FAILURE:   "failed",
+                    WARNINGS:  "completed with warnings",
+                    EXCEPTION: "encountered an exception",
+                }.get(result, "completed with unknown result %d" % result)
+
+                return { 'name': build.getBuilder().getName(),
+                         'result': result,
+                         'resultText': resultText,
+                         'text': ' '.join(build.getText()),
+                         'url': self.master_status.getURLForThing(build),
+                       }
+            buildInfoList = sorted([getBuildInfo(build) for build in builds], key=lambda bi: bi['name'])
+
+            message, verified, reviewed = self.summaryCB(buildInfoList, Results[buildset['results']], self.master_status, self.summaryArg)
+            self.sendCodeReviews(builds[0], message, verified, reviewed)
 
     def sendCodeReviews(self, build, message, verified=0, reviewed=0):
         if message is None:
